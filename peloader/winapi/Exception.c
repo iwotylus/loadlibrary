@@ -31,18 +31,9 @@ typedef LONG (WINAPI *LPTOP_LEVEL_EXCEPTION_FILTER)(PEXCEPTION_POINTERS Exceptio
 
 static LPTOP_LEVEL_EXCEPTION_FILTER TopLevelExceptionFilter;
 
-#define MPENGINE_HELPER_THROW_HANDLER   0x1095754c
-#define MPENGINE_SCAN_THROW_HANDLER     0x109a9ecf
+#define CXX_EXCEPTION_CODE 0xE06D7363
 
-static bool ShouldUnlinkTargetFrame(PEXCEPTION_FRAME TargetFrame)
-{
-    uintptr_t Handler = (uintptr_t) TargetFrame->handler;
-
-    // These mpengine C++ EH funclets can throw again before their registration
-    // frame is restored normally. Leaving the target frame linked lets the next
-    // throw dispatch through a reused stack slot.
-    return Handler == MPENGINE_HELPER_THROW_HANDLER || Handler == MPENGINE_SCAN_THROW_HANDLER;
-}
+static __thread bool CxxRethrowInProgress;
 
 #ifndef NDEBUG
 // You can use `call DumpExceptionChain()` in gdb, like !exchain in windbg if
@@ -88,6 +79,14 @@ static WINAPI PVOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags
 
     // Setup Record
     memcpy(&Record.ExceptionInformation, Arguments, nNumberOfArguments * sizeof(ULONG));
+
+    // MSVC represents `throw;` with the C++ exception magic but no new object
+    // or ThrowInfo. Its handlers pass the original exception record on to
+    // RtlUnwind, so preserve the observable rethrow state at this boundary.
+    CxxRethrowInProgress = Record.ExceptionCode == CXX_EXCEPTION_CODE
+        && Record.NumberParameters >= 3
+        && Record.ExceptionInformation[1] == 0
+        && Record.ExceptionInformation[2] == 0;
 
     // No need to log C++ Exceptions, this is the common case.
     if (dwExceptionCode != 0xE06D7363) {
@@ -203,8 +202,8 @@ static WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCE
                      Context.uc_mcontext.gregs[REG_EBP],
                      Context.uc_mcontext.gregs[REG_EAX]);
 
-            if (ShouldUnlinkTargetFrame(TargetFrame)) {
-                DebugLog("unlinking target frame=%p handler=%p next=%p",
+            if (CxxRethrowInProgress) {
+                DebugLog("unlinking C++ rethrow frame=%p handler=%p next=%p",
                          ExceptionList,
                          ExceptionList->handler,
                          NextFrame);

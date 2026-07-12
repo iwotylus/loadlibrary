@@ -19,7 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <inttypes.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
@@ -39,7 +38,6 @@
 #include <unistd.h>
 #include <mcheck.h>
 #include <err.h>
-#include <errno.h>
 
 #include "winnt_types.h"
 #include "pe_linker.h"
@@ -63,31 +61,136 @@ const struct rlimit kUsageLimits[] = {
 
 DWORD (* __rsignal)(PHANDLE KernelHandle, DWORD Code, PVOID Params, DWORD Size);
 
-#define MPENGINE_IMAGE_BASE                 0x10000000U
-#define MPENGINE_VALIDATE_CHAIN_ADDRESS     0x104915d4U
-
-static bool ApplyMpengineCompatibilityPatches(PVOID ImageBase)
+static bool MatchPattern(const uint8_t *Data, const uint8_t *Pattern,
+                         const char *Mask, size_t Length)
 {
-    static const uint8_t ValidateChainPatch[] = {
-        0x31, 0xc0,             // xor eax, eax
-        0xc2, 0x10, 0x00,       // ret 0x10
+    for (size_t i = 0; i < Length; i++) {
+        if (Mask[i] == 'x' && Data[i] != Pattern[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static DWORD WINAPI BypassValidateChain(PVOID Input, PVOID Result)
+{
+    BYTE *Flags = Result;
+
+    // The result contains the Authenticode and timestamp-chain verdicts.
+    // The WinAPI compatibility layer deliberately treats both as trusted.
+    Flags[12] = TRUE;
+    Flags[13] = TRUE;
+    return 0;
+}
+
+static bool ApplyMpengineCompatibilityPatches(PVOID ImageBase,
+                                               PIMAGE_NT_HEADERS PeHeader)
+{
+    // ValidateChain checks two adjacent flags in its input before doing the
+    // internal SymCrypt verification. Absolute addresses, branch distances,
+    // and log identifiers are masked because they change when mpengine is
+    // rebuilt.
+    static const uint8_t ValidateChainPattern[] = {
+        0x80, 0x7f, 0x0f, 0x00, 0x74, 0x00,
+        0x80, 0x7f, 0x10, 0x00, 0x74, 0x00,
+        0xa1, 0, 0, 0, 0,
+        0x3d, 0, 0, 0, 0, 0x74, 0x00,
+        0xf6, 0x40, 0x1c, 0x01, 0x74, 0x00,
+        0x68, 0, 0, 0, 0, 0x6a, 0x00,
+        0xff, 0x70, 0x14, 0xff, 0x70, 0x10, 0xe8, 0, 0, 0, 0,
+        0x83, 0xc4, 0x10, 0xb8, 0x57, 0x00, 0x07, 0x80,
+        0xe9, 0, 0, 0, 0, 0xbe, 0x00, 0x01, 0x0b, 0x80,
     };
-    const uintptr_t PageSize = (uintptr_t) getpagesize();
-    uintptr_t PatchAddress;
-    uintptr_t PageStart;
+    static const char ValidateChainMask[] =
+        "xxxxx?xxxxx?x????x????x?xxxxx?x????x?xxxxxxx????"
+        "xxxxxxxx????xxxxxx";
+    static const uint8_t Prologue[] = { 0x55, 0x8b, 0xec, 0x6a, 0xff, 0x68 };
+    PIMAGE_SECTION_HEADER Section = IMAGE_FIRST_SECTION(PeHeader);
+    uint8_t *Match = NULL;
+    uint8_t *MatchSectionStart = NULL;
+    uint8_t *Function = NULL;
+    size_t Matches = 0;
 
-    PatchAddress = (uintptr_t) ImageBase + MPENGINE_VALIDATE_CHAIN_ADDRESS - MPENGINE_IMAGE_BASE;
-    PageStart    = PatchAddress & ~(PageSize - 1);
+    _Static_assert(sizeof(ValidateChainMask) == sizeof(ValidateChainPattern) + 1,
+                   "ValidateChain pattern and mask lengths differ");
 
-    if (mprotect((PVOID) PageStart, PageSize, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LogMessage("failed to make mpengine patch page writable: %s", strerror(errno));
+    for (WORD i = 0; i < PeHeader->FileHeader.NumberOfSections; i++, Section++) {
+        uint8_t *Start;
+        size_t Size;
+
+        if (!(Section->Characteristics & IMAGE_SCN_CNT_CODE)) {
+            continue;
+        }
+
+        Start = (uint8_t *) ImageBase + Section->VirtualAddress;
+        Size = Section->Misc.VirtualSize;
+        if (Size < sizeof(ValidateChainPattern)) {
+            continue;
+        }
+
+        for (size_t Offset = 0; Offset <= Size - sizeof(ValidateChainPattern); Offset++) {
+            if (MatchPattern(Start + Offset, ValidateChainPattern,
+                             ValidateChainMask, sizeof(ValidateChainPattern))) {
+                Match = Start + Offset;
+                MatchSectionStart = Start;
+                Matches++;
+            }
+        }
+    }
+
+    if (Matches != 1) {
+        LogMessage("unable to identify mpengine ValidateChain uniquely (%zu matches)", Matches);
         return false;
     }
 
-    memcpy((PVOID) PatchAddress, ValidateChainPatch, sizeof ValidateChainPatch);
-    __builtin___clear_cache((char *) PatchAddress, (char *) PatchAddress + sizeof ValidateChainPatch);
+    // Locate the nearest standard MSVC exception-handling prologue. Keeping
+    // this separate from the semantic signature tolerates changes in local
+    // variable layout between compiler builds.
+    for (size_t Distance = sizeof(Prologue); Distance <= 128; Distance++) {
+        if ((size_t) (Match - MatchSectionStart) < Distance) {
+            break;
+        }
+        uint8_t *Candidate = Match - Distance;
+        if (memcmp(Candidate, Prologue, sizeof(Prologue)) == 0) {
+            Function = Candidate;
+            break;
+        }
+    }
 
-    LogMessage("Applied mpengine compatibility patch at %#" PRIxPTR, PatchAddress);
+    if (!Function) {
+        LogMessage("failed to install mpengine ValidateChain compatibility hook");
+        return false;
+    }
+
+    {
+        const uintptr_t PageSize = (uintptr_t) getpagesize();
+        const uintptr_t PageStart = (uintptr_t) Function & ~(PageSize - 1);
+        struct branch Redirect = { .opcode = X86_OPCODE_JMP_NEAR };
+        const uintptr_t PageEnd = ((uintptr_t) Function + sizeof(Redirect)
+                                   + PageSize - 1) & ~(PageSize - 1);
+
+        Redirect.operand.i = (uintptr_t) BypassValidateChain
+                           - (uintptr_t) Function
+                           - sizeof(Redirect);
+        if (mprotect((PVOID) PageStart, PageEnd - PageStart,
+                     PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+            LogMessage("failed to make mpengine ValidateChain page writable");
+            return false;
+        }
+
+        memcpy(Function, &Redirect, sizeof(Redirect));
+        __builtin___clear_cache((char *) Function,
+                                (char *) Function + sizeof(Redirect));
+        if (mprotect((PVOID) PageStart, PageEnd - PageStart,
+                     PROT_READ | PROT_EXEC) != 0) {
+            LogMessage("failed to restore mpengine ValidateChain page permissions");
+            return false;
+        }
+    }
+
+    LogMessage("Applied mpengine ValidateChain compatibility hook at RVA %#x",
+               (unsigned int) (Function - (uint8_t *) ImageBase));
     return true;
 }
 
@@ -177,7 +280,7 @@ int main(int argc, char **argv, char **envp)
     DosHeader   = (PIMAGE_DOS_HEADER) image.image;
     PeHeader    = (PIMAGE_NT_HEADERS)(image.image + DosHeader->e_lfanew);
 
-    if (!ApplyMpengineCompatibilityPatches(image.image)) {
+    if (!ApplyMpengineCompatibilityPatches(image.image, PeHeader)) {
         return 1;
     }
 
