@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <ucontext.h>
+#include <err.h>
 
 #include "winnt_types.h"
 #include "pe_linker.h"
@@ -34,6 +35,34 @@ static LPTOP_LEVEL_EXCEPTION_FILTER TopLevelExceptionFilter;
 #define CXX_EXCEPTION_CODE 0xE06D7363
 
 static __thread bool CxxRethrowInProgress;
+
+// engine 1.1.26080 repair: while scanning, the engine's post-unwind code can overwrite
+// an SEH registration record's prev field with the record's own address (prev == self),
+// turning the fs:0 chain into a cycle. We record each unwind target's valid prev here so
+// the dispatcher can repair a self-referential node and continue to the real handler.
+#define UNWIND_SHADOW_SLOTS 256
+static __thread struct { PEXCEPTION_FRAME frame; PEXCEPTION_FRAME prev; } UnwindShadow[UNWIND_SHADOW_SLOTS];
+static __thread unsigned UnwindShadowNext;
+
+static void RememberUnwindTarget(PEXCEPTION_FRAME frame)
+{
+    if (!frame || frame->prev == frame)
+        return;
+    for (unsigned i = 0; i < UNWIND_SHADOW_SLOTS; i++) {
+        if (UnwindShadow[i].frame == frame) { UnwindShadow[i].prev = frame->prev; return; }
+    }
+    UnwindShadow[UnwindShadowNext % UNWIND_SHADOW_SLOTS].frame = frame;
+    UnwindShadow[UnwindShadowNext % UNWIND_SHADOW_SLOTS].prev  = frame->prev;
+    UnwindShadowNext++;
+}
+
+static PEXCEPTION_FRAME RecallUnwindPrev(PEXCEPTION_FRAME frame)
+{
+    for (unsigned i = 0; i < UNWIND_SHADOW_SLOTS; i++)
+        if (UnwindShadow[i].frame == frame && UnwindShadow[i].prev != frame)
+            return UnwindShadow[i].prev;
+    return NULL;
+}
 
 #ifndef NDEBUG
 // You can use `call DumpExceptionChain()` in gdb, like !exchain in windbg if
@@ -108,6 +137,27 @@ static WINAPI PVOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags
 
     for (Depth = 0; ExceptionList; ExceptionList = ExceptionList->prev) {
         DWORD Result;
+
+        // engine 1.1.26080 repair: a valid SEH chain is acyclic and NULL-terminated,
+        // but this engine's post-unwind scan code overwrites a registration record's
+        // prev with its own address (prev == self), which would otherwise spin this
+        // walk forever. Restore the record's real prev (captured at the unwind that
+        // targeted this frame) and keep dispatching to the true handler. If no shadow
+        // entry exists we cannot recover, so fail cleanly rather than hang/segfault.
+        if (ExceptionList->prev == ExceptionList) {
+            PEXCEPTION_FRAME Fixed = RecallUnwindPrev(ExceptionList);
+            if (Fixed && Fixed != ExceptionList) {
+                DebugLog("repairing self-referential SEH frame %p: prev %p -> %p",
+                         ExceptionList, ExceptionList->prev, Fixed);
+                ExceptionList->prev = Fixed;
+            } else {
+                LogMessage("FATAL: self-referential SEH frame %p (handler %p), no shadow "
+                           "prev to repair; see docs/STATUS.md",
+                           ExceptionList, ExceptionList->handler);
+                errx(EXIT_FAILURE, "mpengine SEH chain corrupted (frame %p)",
+                     (void *) ExceptionList);
+            }
+        }
 
         DebugLog("%*s @%p { Prev: %p, Handler: %p }",
                  Depth++, "",
@@ -209,6 +259,8 @@ static WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCE
                          NextFrame);
                 asm("mov %[list], %%fs:0" :: [list] "r"(NextFrame));
             }
+
+            RememberUnwindTarget(ExceptionList);
 
             setcontext(&Context);
 

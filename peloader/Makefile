@@ -1,5 +1,5 @@
 DEBUG   ?= 0
-OPTFLAGS = $(if $(filter 1,$(DEBUG)),-O0,-O3 -march=native)
+OPTFLAGS = $(if $(filter 1,$(DEBUG)),-O0,-O2)
 CFLAGS  = $(OPTFLAGS) -ggdb3 -m32 -std=gnu99 -fshort-wchar -Wno-multichar -Iinclude -mstackrealign
 CPPFLAGS= -D_GNU_SOURCE -I.
 ifneq ($(DEBUG),1)

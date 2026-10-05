@@ -9,3 +9,7 @@ avscript
 eicar.com
 .gradle/
 .idea/
+
+# qemu/gdb crash core dumps (large; never commit)
+*.core
+qemu_mpclient_*.core
