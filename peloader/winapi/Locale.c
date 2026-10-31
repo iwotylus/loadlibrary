@@ -48,7 +48,7 @@ STATIC WINAPI BOOL GetCPInfo(UINT CodePage, LPCPINFO lpCPInfo)
     return TRUE;
 }
 
-STATIC DWORD LocaleNameToLCID(PVOID lpName, DWORD dwFlags)
+STATIC DWORD WINAPI LocaleNameToLCID(PVOID lpName, DWORD dwFlags)
 {
     DebugLog("%p, %#x", lpName, dwFlags);
     return 0x0409;

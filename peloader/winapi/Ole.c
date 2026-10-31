@@ -21,31 +21,33 @@ STATIC DWORD WINAPI CoCreateGuid(PVOID pguid)
     return 0;
 }
 
-STATIC DWORD CoCreateInstance(PVOID rclsid, PVOID pUnkOuter, DWORD dwClsContext, PVOID riid, PVOID *ppv)
+STATIC DWORD WINAPI CoCreateInstance(PVOID rclsid, PVOID pUnkOuter, DWORD dwClsContext, PVOID riid, PVOID *ppv)
 {
     DebugLog("%p, %p, %u, %p, %p", rclsid, pUnkOuter, dwClsContext, riid, ppv);
     return -1;
 }
 
-STATIC DWORD CoInitializeEx(PVOID pvReserved, DWORD dCwoInit)
+STATIC DWORD WINAPI CoInitializeEx(PVOID pvReserved, DWORD dCwoInit)
 {
     DebugLog("%p, %u", pvReserved, dCwoInit);
     return -1;
 }
 
-STATIC DWORD CoSetProxyBlanket(PVOID a)
+STATIC DWORD WINAPI CoSetProxyBlanket(PVOID pProxy, DWORD dwAuthnSvc, DWORD dwAuthzSvc,
+                                       PVOID pServerPrincName, DWORD dwAuthnLevel,
+                                       DWORD dwImpLevel, PVOID pAuthInfo, DWORD dwCapabilities)
 {
     DebugLog("");
     return -1;
 }
 
-STATIC DWORD CoUninitialize(PVOID a)
+STATIC DWORD WINAPI CoUninitialize(void)
 {
     DebugLog("");
     return -1;
 }
 
-STATIC DWORD IIDFromString(PVOID a)
+STATIC DWORD WINAPI IIDFromString(PVOID lpsz, PVOID lpiid)
 {
     DebugLog("");
     return -1;
