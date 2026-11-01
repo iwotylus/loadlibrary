@@ -18,6 +18,7 @@
 #include "log.h"
 #include "winexports.h"
 #include "util.h"
+#include "exception_internal.h"
 
 #define EXCEPTION_CONTINUE_EXECUTION    (-1)
 #define EXCEPTION_CONTINUE_SEARCH       0
@@ -31,6 +32,15 @@ typedef struct _EXCEPTION_POINTERS {
 typedef LONG (WINAPI *LPTOP_LEVEL_EXCEPTION_FILTER)(PEXCEPTION_POINTERS ExceptionInfo);
 
 static LPTOP_LEVEL_EXCEPTION_FILTER TopLevelExceptionFilter;
+
+/* Host-registered backstop, run when the fs:0 chain is exhausted (see
+ * exception_internal.h). NULL keeps the historical __debugbreak() behaviour. */
+static unhandled_cxx_hook_t UnhandledCxxHook;
+
+void SetUnhandledCxxHook(unhandled_cxx_hook_t fn)
+{
+    UnhandledCxxHook = fn;
+}
 
 #define CXX_EXCEPTION_CODE 0xE06D7363
 
@@ -87,7 +97,7 @@ VOID DumpExceptionChain(VOID)
 }
 #endif
 
-static WINAPI PVOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments, PVOID Arguments)
+WINAPI PVOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments, PVOID Arguments)
 {
     PEXCEPTION_FRAME ExceptionList;
     PEXCEPTION_FRAME Dispatch = NULL;
@@ -186,7 +196,15 @@ static WINAPI PVOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags
     DebugLog("%u Element SEH Chain Complete.", Depth);
 
 finished:
-    // I've never seen this reached, I'm not sure if it works.
+    // The fs:0 chain is exhausted and nothing caught this. With mpengine this
+    // never happened. A module that imports the C++ runtime (served by
+    // CxxException.c) can reach here when a thrown exception escapes every
+    // frame: give the host backstop a chance to recover (it longjmps out and
+    // does not return). With no backstop registered, keep the old behaviour.
+    if (UnhandledCxxHook) {
+        LogMessage("unhandled exception %#x, invoking host backstop", dwExceptionCode);
+        UnhandledCxxHook(&Record);
+    }
     __debugbreak();
     return NULL;
 }
@@ -197,7 +215,7 @@ finished:
 #define EH_STACK_INVALID    0x08
 #define EH_NESTED_CALL      0x10
 
-static WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue)
+WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue)
 {
     PEXCEPTION_FRAME ExceptionList;
     DWORD Depth;
@@ -287,7 +305,12 @@ static WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCE
         asm("mov %[list], %%fs:0" :: [list] "r"(ExceptionList->prev));
     }
 
-    // Unhandled C++ Exception?
+    // The unwind walked the whole chain without reaching TargetFrame. This is
+    // a corrupt/foreign target; let the host backstop recover if it can.
+    if (UnhandledCxxHook) {
+        LogMessage("RtlUnwind: target frame %p not found on chain, invoking host backstop", TargetFrame);
+        UnhandledCxxHook(ExceptionRecord);
+    }
     __debugbreak();
 }
 
