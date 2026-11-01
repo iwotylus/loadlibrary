@@ -133,8 +133,16 @@ static void std_throw(const char *msg, const throw_info *ti)
 }
 
 /* ?_Xlength_error@std@@YAXPBD@Z / ?_Xout_of_range@std@@YAXPBD@Z (__cdecl) */
-static void Xlength_error(const char *msg) { std_throw(msg, &ti_length_error); }
-static void Xout_of_range(const char *msg) { std_throw(msg, &ti_out_of_range); }
+static void Xlength_error(const char *msg)
+{
+    DebugLog("std::_Xlength_error(\"%s\")", msg ? msg : "(null)");
+    std_throw(msg, &ti_length_error);
+}
+static void Xout_of_range(const char *msg)
+{
+    DebugLog("std::_Xout_of_range(\"%s\")", msg ? msg : "(null)");
+    std_throw(msg, &ti_out_of_range);
+}
 
 DECLARE_CRT_EXPORT("?_Xlength_error@std@@YAXPBD@Z", Xlength_error);
 DECLARE_CRT_EXPORT("?_Xout_of_range@std@@YAXPBD@Z", Xout_of_range);
