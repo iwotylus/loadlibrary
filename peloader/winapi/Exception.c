@@ -230,7 +230,10 @@ WINAPI void RtlUnwind(PEXCEPTION_FRAME TargetFrame, PVOID TargetIp, PEXCEPTION_R
 
     assert(ExceptionRecord);
     assert(TargetFrame);
-    assert(TargetIp);
+    // TargetIp is intentionally not required: this RtlUnwind resumes at its own
+    // caller's return address (below), never at TargetIp, so the i386 C++ EH and
+    // _global_unwind2 paths legitimately pass TargetIp == NULL. mpengine always
+    // supplied one, which is why the original assumed it was present.
 
     ExceptionRecord->ExceptionFlags |= EH_UNWINDING;
 

@@ -384,8 +384,16 @@ static void cxx_local_unwind(cxx_exception_frame *frame, const cxx_function_desc
 
     while (trylevel != last_level) {
         if (trylevel < 0 || trylevel >= (int)descr->unwind_count) {
-            LogMessage("cxx_local_unwind: invalid trylevel %d", trylevel);
-            terminate();
+            /* The state variable at [ebp-4] is outside this function's unwind
+             * map. Seen on some optimized dwrite frames (aligned / GS-protected
+             * functions whose FuncInfo carries no ip-to-state map, so the state
+             * slot is the only source and the compiler may leave it as scratch
+             * where no cleanup is live). We cannot pick a cleanup action, so we
+             * run none for this frame rather than terminate -- the catch still
+             * unwinds correctly. */
+            DebugLog("cxx_local_unwind: state %d out of range (unwind_count=%u frame=%p); no cleanup for this frame",
+                     trylevel, descr->unwind_count, frame);
+            break;
         }
         handler = descr->unwind_table[trylevel].handler;
         if (handler) call_handler(handler, &frame->ebp);
