@@ -290,7 +290,10 @@ static int o_stdio_common_vsprintf_s(uint64_t opt, char *buf, size_t n, const ch
 static int o_stdio_common_vsnprintf_s(uint64_t opt, char *buf, size_t n, size_t count, const char *fmt,
                                       void *loc, va_list ap)
 { (void)opt; (void)loc; if (buf == NULL || n == 0) return 0;
-  size_t lim = (count + 1 < n) ? count + 1 : n; return vsnprintf(buf, lim, fmt, ap); }
+  /* count may be _TRUNCATE ((size_t)-1); compute the limit without overflowing
+   * count+1 (which would wrap to 0 and write nothing). count >= n means "fill
+   * the whole buffer"; otherwise write count chars plus the NUL. */
+  size_t lim = (count >= n) ? n : count + 1; return vsnprintf(buf, lim, fmt, ap); }
 static void o_std_exception_copy(const void *from, void *to) { (void)from; (void)to; }
 static void o_std_exception_destroy(void *p) { (void)p; }
 static void o_std_type_info_destroy_list(void *p) { (void)p; }

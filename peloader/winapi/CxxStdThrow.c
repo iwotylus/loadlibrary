@@ -120,10 +120,16 @@ static const catchable_type_array cta_length_error = {
 static const catchable_type_array cta_out_of_range = {
     3, { &ct_out_of_range, &ct_logic_error, &ct_exception }};
 
+/* ThrowInfo.pmfnUnwind is the exception's cleanup destructor, invoked by the C++
+ * runtime as a 1-arg thiscall (call_dtor -> dtor(this)). It must be the scalar
+ * destructor exc_dtor, NOT the 2-arg vector-deleting exc_vector_dtor: the latter
+ * would read its `flags` argument from uninitialized stack and, when flags&1 is
+ * set, free() the stack-allocated exception object. exc_vector_dtor belongs only
+ * in the vtable slot, where C++ `delete` passes a real flags value. */
 static const throw_info ti_length_error = {
-    0, (void *)exc_vector_dtor, NULL, &cta_length_error };
+    0, (void *)exc_dtor, NULL, &cta_length_error };
 static const throw_info ti_out_of_range = {
-    0, (void *)exc_vector_dtor, NULL, &cta_out_of_range };
+    0, (void *)exc_dtor, NULL, &cta_out_of_range };
 
 static void std_throw(const char *msg, const throw_info *ti)
 {

@@ -90,10 +90,15 @@ STATIC void *WINAPI st_CoTaskMemAlloc(SIZE_T n) { return malloc(n); }
 STATIC void WINAPI st_CoTaskMemFree(void *p) { free(p); }
 
 /* Minimal locale string compare over 2-byte WCHAR. 1=less, 2=equal, 3=greater (CSTR_*). */
+/* CompareStringW returns CSTR_LESS_THAN(1), CSTR_EQUAL(2), CSTR_GREATER_THAN(3).
+ * NORM_IGNORECASE(0x1) must fold case, or dwrite's case-insensitive font-name
+ * lookups miss matches ("Arial" vs "ARIAL") and take a wrong/failure branch. */
+#define NORM_IGNORECASE 0x00000001
 STATIC int WINAPI st_CompareStringW(DWORD lcid, DWORD flags, const uint16_t *a, int la,
                                     const uint16_t *b, int lb)
 {
-    (void)lcid; (void)flags;
+    (void)lcid;
+    bool fold = (flags & NORM_IGNORECASE) != 0;
     int i = 0;
     for (;; i++) {
         bool ea = (la >= 0) ? (i >= la) : (a[i] == 0);
@@ -104,8 +109,13 @@ STATIC int WINAPI st_CompareStringW(DWORD lcid, DWORD flags, const uint16_t *a, 
             return 1;
         if (eb)
             return 3;
-        if (a[i] != b[i])
-            return (a[i] < b[i]) ? 1 : 3;
+        uint16_t ca = a[i], cb = b[i];
+        if (fold) {
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cb >= 'A' && cb <= 'Z') cb += 32;
+        }
+        if (ca != cb)
+            return (ca < cb) ? 1 : 3;
     }
 }
 
