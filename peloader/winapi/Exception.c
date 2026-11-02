@@ -42,6 +42,29 @@ void SetUnhandledCxxHook(unhandled_cxx_hook_t fn)
     UnhandledCxxHook = fn;
 }
 
+/* dwrite calls RaiseFailFastException(NULL, NULL, 0) on a detected bad state (an assert /
+ * fail-fast). On Windows that terminates the process; here it is an unresolved import that would
+ * trap in unknown_symbol_stub (__debugbreak). Route it through the same host backstop as an
+ * uncaught exception: a fuzzing harness longjmps out and keeps going, so input-validation
+ * fail-fasts do not block exploration. A genuine memory fault is a raw signal, not this path, so
+ * real bugs still crash. STATUS_FAIL_FAST_EXCEPTION lets the harness tell it from a C++ throw. */
+#define STATUS_FAIL_FAST_EXCEPTION 0xC0000602
+void WINAPI RaiseFailFastException(PEXCEPTION_RECORD rec, void *ctx, DWORD flags)
+{
+    (void)ctx;
+    (void)flags;
+    EXCEPTION_RECORD local = {0};
+    if (rec == NULL) {
+        local.ExceptionCode = STATUS_FAIL_FAST_EXCEPTION;
+        rec = &local;
+    }
+    if (UnhandledCxxHook) {
+        LogMessage("RaiseFailFastException code=%#x, invoking host backstop", (unsigned)rec->ExceptionCode);
+        UnhandledCxxHook(rec);
+    }
+    __debugbreak();
+}
+
 #define CXX_EXCEPTION_CODE 0xE06D7363
 
 static __thread bool CxxRethrowInProgress;
@@ -340,6 +363,7 @@ static WINAPI LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(LPTOP_LEV
 
 
 DECLARE_CRT_EXPORT("RaiseException", RaiseException);
+DECLARE_CRT_EXPORT("RaiseFailFastException", RaiseFailFastException);
 DECLARE_CRT_EXPORT("RtlUnwind", RtlUnwind);
 DECLARE_CRT_EXPORT("UnhandledExceptionFilter", UnhandledExceptionFilter);
 DECLARE_CRT_EXPORT("SetUnhandledExceptionFilter", SetUnhandledExceptionFilter);
